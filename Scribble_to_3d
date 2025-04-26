@@ -1,0 +1,2359 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+import tkinter as tk
+from tkinter import ttk, colorchooser, filedialog, messagebox
+import speech_recognition as sr
+import threading
+from gtts import gTTS
+import os
+import platform
+import subprocess
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+import time
+import sys
+import json
+from PIL import Image, ImageTk
+
+# Install required packages if not already installed
+try:
+    import ttkthemes
+except ImportError:
+    print("Installing ttkthemes package...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "ttkthemes"])
+    import ttkthemes
+
+class RibbonMenu:
+    """A class to handle dropdown menus within the ribbon interface"""
+    
+    def __init__(self, parent, title, width=120, **kwargs):
+        self.parent = parent
+        self.title = title
+        self.width = width
+        self.kwargs = kwargs
+        self.is_visible = False
+        self.menu_frame = None
+        self.items = []
+        
+    def add_item(self, text, command, icon=None, **kwargs):
+        """Add an item to the menu"""
+        self.items.append({
+            'text': text,
+            'command': command,
+            'icon': icon,
+            'kwargs': kwargs
+        })
+        
+    def add_separator(self):
+        """Add a separator to the menu"""
+        self.items.append({'separator': True})
+        
+    def show(self, x, y):
+        """Show the menu at the specified position"""
+        if self.is_visible:
+            self.hide()
+            
+        # Create menu frame
+        self.menu_frame = tk.Frame(self.parent, 
+                                  bg="#2D2D2D", 
+                                  relief=tk.RAISED,
+                                  bd=1,
+                                  highlightthickness=1,
+                                  highlightbackground="#555555")
+        self.menu_frame.place(x=x, y=y, width=self.width)
+        
+        # Add items to menu
+        for item in self.items:
+            if 'separator' in item:
+                separator = ttk.Separator(self.menu_frame, orient=tk.HORIZONTAL)
+                separator.pack(fill=tk.X, padx=2, pady=2)
+            else:
+                btn = tk.Button(self.menu_frame, 
+                              text=item['text'],
+                              command=item['command'],
+                              bg="#2D2D2D",
+                              fg="white",
+                              activebackground="#0078D7",
+                              activeforeground="white",
+                              bd=0,
+                              padx=5,
+                              pady=3,
+                              anchor=tk.W,
+                              width=self.width-10,
+                              **item['kwargs'])
+                btn.pack(fill=tk.X, padx=1, pady=1)
+        
+        # Set up event to close menu when clicked outside
+        self.parent.bind("<Button-1>", self.check_close, add="+")
+        self.is_visible = True
+        
+    def hide(self):
+        """Hide the menu"""
+        if self.menu_frame:
+            self.menu_frame.destroy()
+            self.menu_frame = None
+        self.is_visible = False
+        
+    def check_close(self, event):
+        """Check if click is outside menu and close if it is"""
+        if self.is_visible and self.menu_frame:
+            # Check if click is outside menu
+            x, y = event.x_root, event.y_root
+            menu_x = self.menu_frame.winfo_rootx()
+            menu_y = self.menu_frame.winfo_rooty()
+            menu_width = self.menu_frame.winfo_width()
+            menu_height = self.menu_frame.winfo_height()
+            
+            if not (menu_x <= x <= menu_x + menu_width and menu_y <= y <= menu_y + menu_height):
+                self.hide()
+                self.parent.unbind("<Button-1>", funcid=None)
+
+class RibbonInterface(ttk.Frame):
+    """A modern ribbon-style interface with tabs and dropdown panels"""
+    
+    def __init__(self, parent, app_instance, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.app = app_instance
+        self.active_tab = None
+        self.panels = {}
+        
+        # Main ribbon container with elevated appearance
+        self.ribbon_frame = ttk.Frame(self)
+        self.ribbon_frame.pack(fill=tk.X, pady=2)
+        
+        # Tab bar for ribbon categories
+        self.tab_bar = ttk.Frame(self.ribbon_frame)
+        self.tab_bar.pack(fill=tk.X)
+        
+        # Content area for the active panel with slight shadow effect
+        self.panel_container = ttk.Frame(self.ribbon_frame, height=120)
+        self.panel_container.pack(fill=tk.X, pady=2)
+        
+        # Add ribbon tabs
+        self.add_tabs()
+        
+        # Store active menus
+        self.active_menus = []
+        
+    def add_tabs(self):
+        """Create the main ribbon tabs"""
+        # Create tab buttons with modern styling
+        self.create_tab("Home", self.create_home_panel)
+        self.create_tab("Modeling", self.create_modeling_panel)
+        self.create_tab("Materials", self.create_materials_panel)
+        self.create_tab("Animation", self.create_animation_panel)
+        self.create_tab("Rendering", self.create_rendering_panel)
+        self.create_tab("Tools", self.create_tools_panel)
+        
+        # Activate the Home tab by default
+        self.activate_tab("Home")
+    
+    def create_tab(self, name, panel_creator):
+        """Create a tab button in the ribbon"""
+        tab = ttk.Button(self.tab_bar, text=name, style="Ribbon.TButton",
+                       command=lambda: self.activate_tab(name))
+        tab.pack(side=tk.LEFT, padx=2)
+        
+        # Store the panel creator function for later use
+        self.panels[name] = {"button": tab, "creator": panel_creator, "panel": None}
+    
+    def activate_tab(self, tab_name):
+        """Activate the selected tab and show its panel"""
+        # Hide the current panel if one is active
+        if self.active_tab and self.panels[self.active_tab]["panel"]:
+            self.panels[self.active_tab]["panel"].pack_forget()
+            
+            # Reset the active tab button style
+            self.panels[self.active_tab]["button"].configure(style="Ribbon.TButton")
+        
+        # Set the new active tab
+        self.active_tab = tab_name
+        
+        # Set the active tab button style
+        self.panels[tab_name]["button"].configure(style="RibbonSelected.TButton")
+        
+        # Create the panel if it doesn't exist yet
+        if not self.panels[tab_name]["panel"]:
+            panel = ttk.Frame(self.panel_container)
+            self.panels[tab_name]["creator"](panel)  # Call the panel creator function
+            self.panels[tab_name]["panel"] = panel
+        
+        # Show the panel
+        self.panels[tab_name]["panel"].pack(fill=tk.BOTH, expand=True)
+    
+    def create_home_panel(self, panel):
+        """Create the Home tab panel with common commands"""
+        # File group
+        file_group = self.create_ribbon_group(panel, "File")
+        
+        # New project button with icon and dropdown
+        new_frame = ttk.Frame(file_group)
+        new_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        new_btn = ttk.Button(new_frame, text="New", width=10, 
+                           command=self.app.clear_canvas)
+        new_btn.pack(anchor=tk.CENTER)
+        
+        # New dropdown button
+        new_dropdown = ttk.Button(new_frame, text="▼", width=3,
+                                command=lambda btn=new_btn: self.show_file_new_menu(btn))
+        new_dropdown.pack(pady=2)
+        
+        # Save button with dropdown
+        save_frame = ttk.Frame(file_group)
+        save_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        save_btn = ttk.Button(save_frame, text="Save", width=10,
+                            command=self.app.save_project)
+        save_btn.pack(anchor=tk.CENTER)
+        
+        save_dropdown = ttk.Button(save_frame, text="▼", width=3,
+                                 command=lambda btn=save_btn: self.show_file_save_menu(btn))
+        save_dropdown.pack(pady=2)
+        
+        # Export button with dropdown
+        export_frame = ttk.Frame(file_group)
+        export_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        export_btn = ttk.Button(export_frame, text="Export", width=10,
+                              command=self.app.export_model)
+        export_btn.pack(anchor=tk.CENTER)
+        
+        export_dropdown = ttk.Button(export_frame, text="▼", width=3,
+                                   command=lambda btn=export_btn: self.show_export_menu(btn))
+        export_dropdown.pack(pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Edit group
+        edit_group = self.create_ribbon_group(panel, "Edit")
+        
+        # Undo/Redo buttons
+        undo_btn = ttk.Button(edit_group, text="Undo", width=10,
+                            command=self.app.undo)
+        undo_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        redo_btn = ttk.Button(edit_group, text="Redo", width=10,
+                            command=self.app.redo)
+        redo_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Clear button
+        clear_btn = ttk.Button(edit_group, text="Clear", width=10,
+                             command=self.app.clear_canvas)
+        clear_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # View group
+        view_group = self.create_ribbon_group(panel, "View")
+        
+        # View mode buttons
+        solid_btn = ttk.Button(view_group, text="Solid", width=10,
+                             command=lambda: self.app.set_view_mode("solid"))
+        solid_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        wire_btn = ttk.Button(view_group, text="Wireframe", width=10,
+                            command=lambda: self.app.set_view_mode("wireframe"))
+        wire_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Camera reset button
+        camera_btn = ttk.Button(view_group, text="Reset Camera", width=12,
+                              command=self.app.reset_camera)
+        camera_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Quick shapes group
+        shapes_group = self.create_ribbon_group(panel, "Quick Create")
+        
+        # Quick shape buttons
+        sphere_btn = ttk.Button(shapes_group, text="Sphere", width=10,
+                              command=self.app.create_sphere)
+        sphere_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        cube_btn = ttk.Button(shapes_group, text="Cube", width=10,
+                            command=self.app.create_cube)
+        cube_btn.pack(side=tk.LEFT, padx=5, pady=2)
+    
+    def create_modeling_panel(self, panel):
+        """Create the Modeling tab panel with shape creation tools and nested menus"""
+        # Basic shapes group
+        shapes_group = self.create_ribbon_group(panel, "Shapes")
+        
+        # Basic shapes dropdown
+        basic_shapes_frame = ttk.Frame(shapes_group)
+        basic_shapes_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        basic_shapes_btn = ttk.Button(basic_shapes_frame, text="Basic Shapes", width=12)
+        basic_shapes_btn.pack()
+        
+        basic_shapes_menu_btn = ttk.Button(basic_shapes_frame, text="▼", width=3,
+                                         command=lambda btn=basic_shapes_btn: 
+                                         self.show_basic_shapes_menu(btn))
+        basic_shapes_menu_btn.pack(pady=2)
+        
+        # Advanced shapes dropdown
+        advanced_shapes_frame = ttk.Frame(shapes_group)
+        advanced_shapes_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        advanced_shapes_btn = ttk.Button(advanced_shapes_frame, text="Advanced Shapes", width=14)
+        advanced_shapes_btn.pack()
+        
+        advanced_shapes_menu_btn = ttk.Button(advanced_shapes_frame, text="▼", width=3,
+                                            command=lambda btn=advanced_shapes_btn: 
+                                            self.show_advanced_shapes_menu(btn))
+        advanced_shapes_menu_btn.pack(pady=2)
+        
+        # Custom shapes dropdown
+        custom_shapes_frame = ttk.Frame(shapes_group)
+        custom_shapes_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        custom_shapes_btn = ttk.Button(custom_shapes_frame, text="Custom Shapes", width=13)
+        custom_shapes_btn.pack()
+        
+        custom_shapes_menu_btn = ttk.Button(custom_shapes_frame, text="▼", width=3,
+                                          command=lambda btn=custom_shapes_btn: 
+                                          self.show_custom_shapes_menu(btn))
+        custom_shapes_menu_btn.pack(pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Modify group
+        modify_group = self.create_ribbon_group(panel, "Modify")
+        
+        # Deform dropdown
+        deform_frame = ttk.Frame(modify_group)
+        deform_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        deform_btn = ttk.Button(deform_frame, text="Deform", width=10)
+        deform_btn.pack()
+        
+        deform_menu_btn = ttk.Button(deform_frame, text="▼", width=3,
+                                    command=lambda btn=deform_btn: 
+                                    self.show_deform_menu(btn))
+        deform_menu_btn.pack(pady=2)
+        
+        # Boolean operations dropdown
+        boolean_frame = ttk.Frame(modify_group)
+        boolean_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        boolean_btn = ttk.Button(boolean_frame, text="Boolean", width=10)
+        boolean_btn.pack()
+        
+        boolean_menu_btn = ttk.Button(boolean_frame, text="▼", width=3,
+                                     command=lambda btn=boolean_btn: 
+                                     self.show_boolean_menu(btn))
+        boolean_menu_btn.pack(pady=2)
+        
+        # Transform dropdown
+        transform_frame = ttk.Frame(modify_group)
+        transform_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        transform_btn = ttk.Button(transform_frame, text="Transform", width=10)
+        transform_btn.pack()
+        
+        transform_menu_btn = ttk.Button(transform_frame, text="▼", width=3,
+                                       command=lambda btn=transform_btn: 
+                                       self.show_transform_menu(btn))
+        transform_menu_btn.pack(pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Arrange group
+        arrange_group = self.create_ribbon_group(panel, "Arrange")
+        
+        # Align dropdown
+        align_frame = ttk.Frame(arrange_group)
+        align_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        align_btn = ttk.Button(align_frame, text="Align", width=10)
+        align_btn.pack()
+        
+        align_menu_btn = ttk.Button(align_frame, text="▼", width=3,
+                                   command=lambda btn=align_btn: 
+                                   self.show_align_menu(btn))
+        align_menu_btn.pack(pady=2)
+        
+        # Array dropdown
+        array_frame = ttk.Frame(arrange_group)
+        array_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        array_btn = ttk.Button(array_frame, text="Array", width=10)
+        array_btn.pack()
+        
+        array_menu_btn = ttk.Button(array_frame, text="▼", width=3,
+                                   command=lambda btn=array_btn: 
+                                   self.show_array_menu(btn))
+        array_menu_btn.pack(pady=2)
+    
+    def create_materials_panel(self, panel):
+        """Create the Materials tab panel"""
+        # Colors group
+        colors_group = self.create_ribbon_group(panel, "Color Maps")
+        
+        # Color buttons
+        self.create_ribbon_button(colors_group, "Viridis", 
+                                lambda: self.app.set_color("viridis"), 
+                                color="#21918c")
+        self.create_ribbon_button(colors_group, "Plasma", 
+                                lambda: self.app.set_color("plasma"), 
+                                color="#6a00a8")
+        self.create_ribbon_button(colors_group, "Magma", 
+                                lambda: self.app.set_color("magma"), 
+                                color="#b53679")
+        self.create_ribbon_button(colors_group, "Inferno", 
+                                lambda: self.app.set_color("inferno"), 
+                                color="#b53679")
+                                
+        # Custom color picker
+        custom_color_btn = ttk.Button(colors_group, text="Custom Color", width=12,
+                                    command=self.pick_custom_color)
+        custom_color_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Transparency group
+        transparency_group = self.create_ribbon_group(panel, "Transparency")
+        
+        # Alpha slider
+        alpha_label = ttk.Label(transparency_group, text="Alpha:")
+        alpha_label.pack(side=tk.LEFT, padx=5)
+        
+        alpha_slider = ttk.Scale(transparency_group, from_=0.1, to=1.0, 
+                               orient=tk.HORIZONTAL, length=150,
+                               command=self.update_alpha)
+        alpha_slider.set(self.app.current_alpha)
+        alpha_slider.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Textures group
+        textures_group = self.create_ribbon_group(panel, "Textures")
+        
+        # Texture dropdown
+        textures_frame = ttk.Frame(textures_group)
+        textures_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        textures_btn = ttk.Button(textures_frame, text="Textures", width=10)
+        textures_btn.pack()
+        
+        textures_menu_btn = ttk.Button(textures_frame, text="▼", width=3,
+                                      command=lambda btn=textures_btn: 
+                                      self.show_textures_menu(btn))
+        textures_menu_btn.pack(pady=2)
+        
+        # Materials dropdown
+        materials_frame = ttk.Frame(textures_group)
+        materials_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        materials_btn = ttk.Button(materials_frame, text="Materials", width=10)
+        materials_btn.pack()
+        
+        materials_menu_btn = ttk.Button(materials_frame, text="▼", width=3,
+                                       command=lambda btn=materials_btn: 
+                                       self.show_materials_menu(btn))
+        materials_menu_btn.pack(pady=2)
+    
+    def create_animation_panel(self, panel):
+        """Create the Animation tab panel"""
+        # Timeline group
+        timeline_group = self.create_ribbon_group(panel, "Timeline")
+        
+        # Animation control buttons
+        self.create_ribbon_button(timeline_group, "Play", 
+                                lambda: self.app.play_animation())
+        self.create_ribbon_button(timeline_group, "Pause", 
+                                lambda: self.app.pause_animation())
+        self.create_ribbon_button(timeline_group, "Stop", 
+                                lambda: self.app.stop_animation())
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Keyframes group
+        keyframe_group = self.create_ribbon_group(panel, "Keyframes")
+        
+        # Keyframe buttons
+        self.create_ribbon_button(keyframe_group, "Add Key", 
+                                lambda: self.not_implemented("Add keyframe"))
+        self.create_ribbon_button(keyframe_group, "Delete Key", 
+                                lambda: self.not_implemented("Delete keyframe"))
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Motion group
+        motion_group = self.create_ribbon_group(panel, "Motion")
+        
+        # Motion dropdown
+        motion_frame = ttk.Frame(motion_group)
+        motion_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        motion_btn = ttk.Button(motion_frame, text="Motion", width=10)
+        motion_btn.pack()
+        
+        motion_menu_btn = ttk.Button(motion_frame, text="▼", width=3,
+                                    command=lambda btn=motion_btn: 
+                                    self.show_motion_menu(btn))
+        motion_menu_btn.pack(pady=2)
+        
+        # Preset animations dropdown
+        presets_frame = ttk.Frame(motion_group)
+        presets_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        presets_btn = ttk.Button(presets_frame, text="Presets", width=10)
+        presets_btn.pack()
+        
+        presets_menu_btn = ttk.Button(presets_frame, text="▼", width=3,
+                                     command=lambda btn=presets_btn: 
+                                     self.show_animation_presets_menu(btn))
+        presets_menu_btn.pack(pady=2)
+    
+    def create_rendering_panel(self, panel):
+        """Create the Rendering tab panel"""
+        # Quality group
+        quality_group = self.create_ribbon_group(panel, "Quality")
+        
+        # Quality options
+        quality_label = ttk.Label(quality_group, text="Shape Quality:")
+        quality_label.pack(side=tk.LEFT, padx=5)
+        
+        quality_slider = ttk.Scale(quality_group, from_=0.1, to=1.0, 
+                                 orient=tk.HORIZONTAL, length=150,
+                                 command=self.update_quality)
+        quality_slider.set(self.app.shape_quality)
+        quality_slider.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Lighting group
+        lighting_group = self.create_ribbon_group(panel, "Lighting")
+        
+        # Lighting dropdown
+        lighting_frame = ttk.Frame(lighting_group)
+        lighting_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        lighting_btn = ttk.Button(lighting_frame, text="Lighting", width=10)
+        lighting_btn.pack()
+        
+        lighting_menu_btn = ttk.Button(lighting_frame, text="▼", width=3,
+                                      command=lambda btn=lighting_btn: 
+                                      self.show_lighting_menu(btn))
+        lighting_menu_btn.pack(pady=2)
+        
+        # Shadows dropdown
+        shadows_frame = ttk.Frame(lighting_group)
+        shadows_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        shadows_btn = ttk.Button(shadows_frame, text="Shadows", width=10)
+        shadows_btn.pack()
+        
+        shadows_menu_btn = ttk.Button(shadows_frame, text="▼", width=3,
+                                     command=lambda btn=shadows_btn: 
+                                     self.show_shadows_menu(btn))
+        shadows_menu_btn.pack(pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Export group
+        export_group = self.create_ribbon_group(panel, "Export")
+        
+        # Export buttons
+        self.create_ribbon_button(export_group, "Render", 
+                                lambda: self.not_implemented("Render scene"))
+        self.create_ribbon_button(export_group, "Save Image", 
+                                lambda: self.app.save_image())
+    
+    def create_tools_panel(self, panel):
+        """Create the Tools tab panel"""
+        # Voice group
+        voice_group = self.create_ribbon_group(panel, "Voice Control")
+        
+        # Voice button with state indicator
+        voice_frame = ttk.Frame(voice_group)
+        voice_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        voice_btn = ttk.Button(voice_frame, textvariable=self.app.voice_btn_text, 
+                             width=10, command=self.app.toggle_voice_commands)
+        voice_btn.pack(anchor=tk.CENTER)
+        
+        voice_status = ttk.Label(voice_frame, text="Not Listening")
+        voice_status.pack(pady=2)
+        
+        # Voice commands help button
+        help_btn = ttk.Button(voice_group, text="Commands List", width=12,
+                            command=lambda: self.show_commands_help())
+        help_btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Preferences group
+        prefs_group = self.create_ribbon_group(panel, "Preferences")
+        
+        # Settings buttons
+        self.create_ribbon_button(prefs_group, "Settings", 
+                                lambda: self.not_implemented("Settings dialog"))
+        self.create_ribbon_button(prefs_group, "Themes", 
+                                lambda: self.show_theme_selector())
+        
+        # Grid size control
+        grid_frame = ttk.Frame(prefs_group)
+        grid_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        grid_label = ttk.Label(grid_frame, text="Grid Size:")
+        grid_label.pack()
+        
+        grid_var = tk.StringVar(value=str(self.app.grid_size))
+        grid_combo = ttk.Combobox(grid_frame, textvariable=grid_var, 
+                                width=5, values=["20", "40", "60", "80", "100"])
+        grid_combo.pack(pady=2)
+        grid_combo.bind("<<ComboboxSelected>>", 
+                       lambda e: self.app.set_grid_size(int(grid_var.get())))
+        
+        # Separator
+        ttk.Separator(panel, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
+        
+        # Help group
+        help_group = self.create_ribbon_group(panel, "Help")
+        
+        # Help buttons
+        self.create_ribbon_button(help_group, "Documentation", 
+                                lambda: self.not_implemented("Open documentation"))
+        self.create_ribbon_button(help_group, "About", 
+                                lambda: self.show_about_dialog())
+    
+    def create_ribbon_group(self, parent, title):
+        """Create a group frame with title in the ribbon"""
+        group_frame = ttk.LabelFrame(parent, text=title)
+        group_frame.pack(side=tk.LEFT, padx=5, pady=2, fill=tk.Y)
+        return group_frame
+    
+    def create_ribbon_button(self, parent, text, command, color=None):
+        """Create a button with icon and label in ribbon style"""
+        btn_frame = ttk.Frame(parent)
+        btn_frame.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        # Color indicator if provided
+        if color:
+            color_indicator = tk.Frame(btn_frame, width=20, height=3, bg=color)
+            color_indicator.pack(pady=1)
+        
+        # Button
+        button = ttk.Button(btn_frame, text=text, width=10, command=command)
+        button.pack()
+        
+        return button
+    
+    def show_file_new_menu(self, button):
+        """Show file new menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "New")
+        menu.add_item("Empty Project", self.app.clear_canvas)
+        menu.add_item("From Template", lambda: self.not_implemented("New from template"))
+        menu.add_separator()
+        menu.add_item("Import Model", lambda: self.not_implemented("Import model"))
+        menu.show(x, y)
+    
+    def show_file_save_menu(self, button):
+        """Show file save menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Save")
+        menu.add_item("Save", self.app.save_project)
+        menu.add_item("Save As...", lambda: self.app.save_project_as())
+        menu.add_item("Save Copy", lambda: self.not_implemented("Save copy"))
+        menu.add_separator()
+        menu.add_item("Auto Save Settings", lambda: self.not_implemented("Auto save settings"))
+        menu.show(x, y)
+    
+    def show_export_menu(self, button):
+        """Show export menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Export", width=150)
+        menu.add_item("OBJ Format", lambda: self.app.export_model("obj"))
+        menu.add_item("STL Format", lambda: self.app.export_model("stl"))
+        menu.add_item("FBX Format", lambda: self.app.export_model("fbx"))
+        menu.add_item("GLTF Format", lambda: self.app.export_model("gltf"))
+        menu.add_separator()
+        menu.add_item("Export Settings...", lambda: self.not_implemented("Export settings"))
+        menu.show(x, y)
+    
+    def show_basic_shapes_menu(self, button):
+        """Show basic shapes menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Basic Shapes", width=150)
+        menu.add_item("Sphere", self.app.create_sphere)
+        menu.add_item("Cube", self.app.create_cube)
+        menu.add_item("Cylinder", self.app.create_cylinder)
+        menu.add_item("Cone", self.app.create_cone)
+        menu.add_separator()
+        menu.add_item("Plane", lambda: self.app.create_plane())
+        menu.add_item("Disk", lambda: self.app.create_disk())
+        menu.add_item("Rectangle", lambda: self.app.create_rectangle())
+        menu.add_item("Triangle", lambda: self.app.create_triangle())
+        menu.show(x, y)
+    
+    def show_advanced_shapes_menu(self, button):
+        """Show advanced shapes menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Advanced Shapes", width=150)
+        menu.add_item("Torus", lambda: self.app.create_torus())
+        menu.add_item("Pyramid", lambda: self.app.create_pyramid())
+        menu.add_item("Prism", lambda: self.app.create_prism())
+        menu.add_separator()
+        menu.add_item("Tetrahedron", lambda: self.app.create_tetrahedron())
+        menu.add_item("Octahedron", lambda: self.app.create_octahedron())
+        menu.add_item("Dodecahedron", lambda: self.app.create_dodecahedron())
+        menu.add_item("Icosahedron", lambda: self.app.create_icosahedron())
+        menu.show(x, y)
+    
+    def show_custom_shapes_menu(self, button):
+        """Show custom shapes menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Custom Shapes", width=150)
+        menu.add_item("From Equation", lambda: self.not_implemented("Create from equation"))
+        menu.add_item("From Sketch", lambda: self.not_implemented("Create from sketch"))
+        menu.add_separator()
+        menu.add_item("Load Custom...", lambda: self.not_implemented("Load custom shape"))
+        menu.add_item("Recent Customs", lambda: self.not_implemented("Recent custom shapes"))
+        menu.show(x, y)
+    
+    def show_deform_menu(self, button):
+        """Show deform menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Deform", width=150)
+        menu.add_item("Twist", lambda: self.not_implemented("Twist deformation"))
+        menu.add_item("Bend", lambda: self.not_implemented("Bend deformation"))
+        menu.add_item("Taper", lambda: self.not_implemented("Taper deformation"))
+        menu.add_separator()
+        menu.add_item("Noise", lambda: self.not_implemented("Noise deformation"))
+        menu.add_item("Smooth", lambda: self.not_implemented("Smooth deformation"))
+        menu.show(x, y)
+    
+    def show_boolean_menu(self, button):
+        """Show boolean operations menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Boolean", width=150)
+        menu.add_item("Union", lambda: self.not_implemented("Boolean union"))
+        menu.add_item("Intersection", lambda: self.not_implemented("Boolean intersection"))
+        menu.add_item("Difference", lambda: self.not_implemented("Boolean difference"))
+        menu.add_separator()
+        menu.add_item("Advanced...", lambda: self.not_implemented("Advanced boolean"))
+        menu.show(x, y)
+    
+    def show_transform_menu(self, button):
+        """Show transform menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Transform", width=150)
+        menu.add_item("Rotate", lambda: self.app.start_rotation())
+        menu.add_item("Scale", lambda: self.not_implemented("Scale model"))
+        menu.add_item("Move", lambda: self.not_implemented("Move model"))
+        menu.add_separator()
+        menu.add_item("Mirror", lambda: self.not_implemented("Mirror model"))
+        menu.add_item("Flip", lambda: self.not_implemented("Flip model"))
+        menu.show(x, y)
+    
+    def show_align_menu(self, button):
+        """Show align menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Align", width=150)
+        menu.add_item("Center", lambda: self.not_implemented("Center align"))
+        menu.add_item("Top", lambda: self.not_implemented("Top align"))
+        menu.add_item("Bottom", lambda: self.not_implemented("Bottom align"))
+        menu.add_separator()
+        menu.add_item("Left", lambda: self.not_implemented("Left align"))
+        menu.add_item("Right", lambda: self.not_implemented("Right align"))
+        menu.show(x, y)
+    
+    def show_array_menu(self, button):
+        """Show array menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Array", width=150)
+        menu.add_item("Linear", lambda: self.not_implemented("Linear array"))
+        menu.add_item("Circular", lambda: self.not_implemented("Circular array"))
+        menu.add_item("Grid", lambda: self.not_implemented("Grid array"))
+        menu.add_separator()
+        menu.add_item("Custom Pattern", lambda: self.not_implemented("Custom pattern array"))
+        menu.show(x, y)
+    
+    def show_textures_menu(self, button):
+        """Show textures menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Textures", width=150)
+        menu.add_item("Wood", lambda: self.not_implemented("Wood texture"))
+        menu.add_item("Metal", lambda: self.not_implemented("Metal texture"))
+        menu.add_item("Plastic", lambda: self.not_implemented("Plastic texture"))
+        menu.add_separator()
+        menu.add_item("Import Texture...", lambda: self.not_implemented("Import texture"))
+        menu.add_item("Create New...", lambda: self.not_implemented("Create texture"))
+        menu.show(x, y)
+    
+    def show_materials_menu(self, button):
+        """Show materials menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Materials", width=150)
+        menu.add_item("Matte", lambda: self.not_implemented("Matte material"))
+        menu.add_item("Glossy", lambda: self.not_implemented("Glossy material"))
+        menu.add_item("Transparent", lambda: self.not_implemented("Transparent material"))
+        menu.add_separator()
+        menu.add_item("Custom Material...", lambda: self.not_implemented("Custom material"))
+        menu.show(x, y)
+    
+    def show_motion_menu(self, button):
+        """Show motion menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Motion", width=150)
+        menu.add_item("Rotate", lambda: self.app.start_rotation())
+        menu.add_item("Scale", lambda: self.not_implemented("Scale animation"))
+        menu.add_item("Move", lambda: self.not_implemented("Move animation"))
+        menu.add_separator()
+        menu.add_item("Path Follow", lambda: self.not_implemented("Path follow animation"))
+        menu.add_item("Custom Motion...", lambda: self.not_implemented("Custom motion"))
+        menu.show(x, y)
+    
+    def show_animation_presets_menu(self, button):
+        """Show animation presets menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Animation Presets", width=150)
+        menu.add_item("Bounce", lambda: self.app.animate_bounce())
+        menu.add_item("Spin", lambda: self.app.animate_spin())
+        menu.add_item("Pulse", lambda: self.app.animate_pulse())
+        menu.add_separator()
+        menu.add_item("Save Current...", lambda: self.not_implemented("Save animation preset"))
+        menu.add_item("Load Preset...", lambda: self.not_implemented("Load animation preset"))
+        menu.show(x, y)
+    
+    def show_lighting_menu(self, button):
+        """Show lighting menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Lighting", width=150)
+        menu.add_item("Directional Light", lambda: self.not_implemented("Add directional light"))
+        menu.add_item("Point Light", lambda: self.not_implemented("Add point light"))
+        menu.add_item("Spot Light", lambda: self.not_implemented("Add spot light"))
+        menu.add_separator()
+        menu.add_item("Ambient Light", lambda: self.not_implemented("Set ambient light"))
+        menu.show(x, y)
+    
+    def show_shadows_menu(self, button):
+        """Show shadows menu"""
+        x = button.winfo_rootx()
+        y = button.winfo_rooty() + button.winfo_height()
+        
+        menu = RibbonMenu(self.winfo_toplevel(), "Shadows", width=150)
+        menu.add_item("Enable Shadows", lambda: self.not_implemented("Enable shadows"))
+        menu.add_item("Disable Shadows", lambda: self.not_implemented("Disable shadows"))
+        menu.add_separator()
+        menu.add_item("Soft Shadows", lambda: self.not_implemented("Soft shadows"))
+        menu.add_item("Hard Shadows", lambda: self.not_implemented("Hard shadows"))
+        menu.show(x, y)
+    
+    def update_alpha(self, value):
+        """Update the transparency value"""
+        self.app.current_alpha = float(value)
+        self.app.update_3d_view()
+    
+    def update_quality(self, value):
+        """Update the shape quality value"""
+        self.app.shape_quality = float(value)
+        self.app.update_3d_view()
+        
+    def pick_custom_color(self):
+        """Open color picker and set custom color"""
+        color = colorchooser.askcolor(title="Choose Color")
+        if color[1]:  # If a color was selected
+            self.app.set_custom_color(color[1])
+    
+    def show_commands_help(self):
+        """Show a dialog with voice commands help"""
+        help_window = tk.Toplevel(self)
+        help_window.title("Voice Commands Help")
+        help_window.geometry("400x300")
+        help_window.configure(bg=self.app.bg_color)
+        
+        # Style the window
+        frame = ttk.Frame(help_window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title
+        title = ttk.Label(frame, text="Available Voice Commands", font=("Arial", 12, "bold"))
+        title.pack(pady=10)
+        
+        # Commands list
+        commands_text = """
+        • "Sphere" - Create a sphere
+        • "Cube" or "Box" - Create a cube
+        • "Cylinder" - Create a cylinder
+        • "Cone" - Create a cone
+        • "Clear" - Clear the canvas
+        • "Red" - Change to red color map
+        • "Blue" - Change to blue color map
+        • "Green" - Change to green color map
+        • "Wireframe" - Switch to wireframe view
+        • "Solid" - Switch to solid view
+        • "Rotate" - Start/stop rotation
+        • "Undo" - Undo last action
+        • "Redo" - Redo last action
+        • "Stop" or "Exit" - Stop voice recognition
+        """
+        
+        commands_label = ttk.Label(frame, text=commands_text, justify=tk.LEFT)
+        commands_label.pack(pady=10, fill=tk.BOTH)
+        
+        # Close button
+        close_btn = ttk.Button(frame, text="Close", command=help_window.destroy)
+        close_btn.pack(pady=10)
+    
+    def show_theme_selector(self):
+        """Show theme selector dialog"""
+        theme_window = tk.Toplevel(self)
+        theme_window.title("Select Theme")
+        theme_window.geometry("300x400")
+        theme_window.configure(bg=self.app.bg_color)
+        
+        # Style the window
+        frame = ttk.Frame(theme_window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title
+        title = ttk.Label(frame, text="Available Themes", font=("Arial", 12, "bold"))
+        title.pack(pady=10)
+        
+        # Get available themes
+        available_themes = self.app.style.theme_names()
+        
+        # Create theme listbox
+        theme_listbox = tk.Listbox(frame, bg="#2D2D2D", fg="white", 
+                                  selectbackground="#0078D7", height=15)
+        theme_listbox.pack(fill=tk.BOTH, expand=True, pady=10)
+        
+        # Add themes to listbox
+        for theme in available_themes:
+            theme_listbox.insert(tk.END, theme)
+        
+        # Apply button
+        apply_btn = ttk.Button(frame, text="Apply Theme", 
+                             command=lambda: self.apply_theme(theme_listbox.get(theme_listbox.curselection()), 
+                                                            theme_window))
+        apply_btn.pack(pady=10)
+    
+    def apply_theme(self, theme_name, window):
+        """Apply the selected theme"""
+        self.app.style.set_theme(theme_name)
+        self.app.status_var.set(f"Theme changed to {theme_name}")
+        window.destroy()
+    
+    def show_about_dialog(self):
+        """Show about dialog"""
+        about_window = tk.Toplevel(self)
+        about_window.title("About 3D Modeling Studio")
+        about_window.geometry("400x300")
+        about_window.configure(bg=self.app.bg_color)
+        
+        # Style the window
+        frame = ttk.Frame(about_window)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Title
+        title = ttk.Label(frame, text="3D Modeling Studio", font=("Arial", 14, "bold"))
+        title.pack(pady=10)
+        
+        # Version
+        version = ttk.Label(frame, text="Version 1.0")
+        version.pack()
+        
+        # Description
+        desc_text = """
+        A modern 3D modeling application with voice commands,
+        built with Python and Matplotlib.
+        
+        Features:
+        • Basic 3D shape creation
+        • Material and color customization
+        • Voice command interface
+        • Modern ribbon interface
+        • Animation capabilities
+        """
+        
+        desc_label = ttk.Label(frame, text=desc_text, justify=tk.CENTER)
+        desc_label.pack(pady=10, fill=tk.BOTH)
+        
+        # Close button
+        close_btn = ttk.Button(frame, text="Close", command=about_window.destroy)
+        close_btn.pack(pady=10)
+    
+    def not_implemented(self, feature):
+        """Show a message for features not implemented yet"""
+        self.app.status_var.set(f"{feature} feature not implemented yet")
+
+class ModernMenuBar(tk.Menu):
+    """Custom menu bar with modern styling and dropdown menus"""
+    def __init__(self, parent, app_instance, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.app = app_instance
+        
+        # Create main menu categories
+        self.file_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                               activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="File", menu=self.file_menu)
+        
+        self.edit_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                               activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="Edit", menu=self.edit_menu)
+        
+        self.view_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                               activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="View", menu=self.view_menu)
+        
+        self.create_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                                 activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="Create", menu=self.create_menu)
+        
+        self.tools_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                                activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="Tools", menu=self.tools_menu)
+        
+        self.help_menu = tk.Menu(self, tearoff=0, bg="#2D2D2D", fg="white", 
+                               activebackground="#0078D7", activeforeground="white")
+        self.add_cascade(label="Help", menu=self.help_menu)
+        
+        # Populate File menu
+        self.file_menu.add_command(label="New Project", command=self.app.clear_canvas)
+        self.file_menu.add_command(label="Save Project", command=self.app.save_project)
+        self.file_menu.add_command(label="Export 3D Model", command=self.app.export_model)
+        self.file_menu.add_separator()
+        self.file_menu.add_command(label="Exit", command=parent.quit)
+        
+        # Populate Edit menu
+        self.edit_menu.add_command(label="Undo", command=self.app.undo)
+        self.edit_menu.add_command(label="Redo", command=self.app.redo)
+        self.edit_menu.add_separator()
+        self.edit_menu.add_command(label="Clear Canvas", command=self.app.clear_canvas)
+        
+        # Populate View menu
+        self.view_mode_menu = tk.Menu(self.view_menu, tearoff=0, bg="#2D2D2D", fg="white", 
+                                    activebackground="#0078D7", activeforeground="white")
+        self.view_menu.add_cascade(label="View Mode", menu=self.view_mode_menu)
+        self.view_mode_menu.add_command(label="Solid", command=lambda: self.app.set_view_mode("solid"))
+        self.view_mode_menu.add_command(label="Wireframe", command=lambda: self.app.set_view_mode("wireframe"))
+        
+        self.view_menu.add_separator()
+        self.view_menu.add_command(label="Reset Camera", command=self.app.reset_camera)
+        
+        # Populate Create menu
+        self.shapes_menu = tk.Menu(self.create_menu, tearoff=0, bg="#2D2D2D", fg="white", 
+                                 activebackground="#0078D7", activeforeground="white")
+        self.create_menu.add_cascade(label="Basic Shapes", menu=self.shapes_menu)
+        
+        self.shapes_menu.add_command(label="Sphere", command=self.app.create_sphere)
+        self.shapes_menu.add_command(label="Cube", command=self.app.create_cube)
+        self.shapes_menu.add_command(label="Cylinder", command=self.app.create_cylinder)
+        self.shapes_menu.add_command(label="Cone", command=self.app.create_cone)
+        
+        # Advanced shapes submenu
+        self.advanced_shapes_menu = tk.Menu(self.create_menu, tearoff=0, bg="#2D2D2D", fg="white", 
+                                          activebackground="#0078D7", activeforeground="white")
+        self.create_menu.add_cascade(label="Advanced Shapes", menu=self.advanced_shapes_menu)
+        
+        self.advanced_shapes_menu.add_command(label="Torus", command=lambda: self.app.create_torus())
+        self.advanced_shapes_menu.add_command(label="Pyramid", command=lambda: self.app.create_pyramid())
+        self.advanced_shapes_menu.add_command(label="Prism", command=lambda: self.app.create_prism())
+        
+        # Populate Tools menu
+        self.tools_menu.add_command(label="Voice Commands", command=self.app.toggle_voice_commands)
+        
+        # Color submenu in Tools
+        self.color_menu = tk.Menu(self.tools_menu, tearoff=0, bg="#2D2D2D", fg="white", 
+                                activebackground="#0078D7", activeforeground="white")
+        self.tools_menu.add_cascade(label="Colors", menu=self.color_menu)
+        
+        self.color_menu.add_command(label="Blue", command=lambda: self.app.set_color("plasma"))
+        self.color_menu.add_command(label="Red", command=lambda: self.app.set_color("magma"))
+        self.color_menu.add_command(label="Green", command=lambda: self.app.set_color("viridis"))
+        self.color_menu.add_command(label="Yellow", command=lambda: self.app.set_color("inferno"))
+        
+        # Animation submenu
+        self.animation_menu = tk.Menu(self.tools_menu, tearoff=0, bg="#2D2D2D", fg="white", 
+                                    activebackground="#0078D7", activeforeground="white")
+        self.tools_menu.add_cascade(label="Animation", menu=self.animation_menu)
+        
+        self.animation_menu.add_command(label="Start Rotation", command=self.app.start_rotation)
+        self.animation_menu.add_command(label="Bounce", command=lambda: self.app.animate_bounce())
+        self.animation_menu.add_command(label="Pulse", command=lambda: self.app.animate_pulse())
+        
+        # Populate Help menu
+        self.help_menu.add_command(label="Documentation", command=lambda: self.app.ribbon.not_implemented("Documentation"))
+        self.help_menu.add_command(label="About", command=lambda: self.app.ribbon.show_about_dialog())
+
+class ModernModelingApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("3D Modeling Studio")
+        self.root.geometry("1200x800")
+        
+        # Apply modern theme
+        self.style = ttkthemes.ThemedStyle(root)
+        self.style.set_theme("equilux")  # Modern dark theme
+        
+        # Configure custom styles for ribbon
+        self.style.configure("Ribbon.TButton", background="#2D2D2D", 
+                           foreground="white", padding=5)
+        self.style.configure("RibbonSelected.TButton", background="#0078D7", 
+                           foreground="white", padding=5)
+        
+        # Configure colors
+        self.bg_color = "#1E1E1E"  # Dark background
+        self.accent_color = "#0078D7"  # Blue accent
+        self.text_color = "#FFFFFF"  # White text
+        
+        # Configure root window
+        self.root.configure(bg=self.bg_color)
+        
+        # Model parameters
+        self.grid_size = 40
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        self.shape_quality = 0.7
+        self.current_color = 'viridis'
+        self.current_alpha = 0.8
+        self.view_mode = "solid"
+        self.is_rotating = False
+        self.rotation_angle = 0
+        
+        # Animation parameters
+        self.animation_active = False
+        self.animation_type = None
+        self.animation_frame = 0
+        self.animation_speed = 0.1
+        
+        # Create modern menubar
+        self.menu_bar = ModernMenuBar(self.root, self, bg=self.bg_color, fg=self.text_color)
+        self.root.config(menu=self.menu_bar)
+        
+        # Create ribbon interface
+        self.ribbon = RibbonInterface(self.root, self)
+        self.ribbon.pack(fill=tk.X)
+        
+        # Main content frame with splitter
+        self.content_frame = ttk.Frame(self.root)
+        self.content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Create left panel for properties/tools
+        self.left_panel = ttk.Frame(self.content_frame, width=200)
+        self.left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        
+        # Create properties panel
+        self.create_properties_panel()
+        
+        # Create main 3D view panel
+        self.view_panel = ttk.Frame(self.content_frame)
+        self.view_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Create 3D visualization
+        self.setup_3d_view()
+        
+        # Status bar
+        self.status_var = tk.StringVar()
+        self.status_var.set("Ready")
+        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, 
+                                  relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Speech recognition
+        self.recognizer = sr.Recognizer()
+        self.is_listening = False
+        self.voice_thread = None
+        self.voice_btn_text = tk.StringVar(value="Start Voice")
+        
+        # Command history for undo/redo
+        self.command_history = []
+        self.current_command_index = -1
+        
+        # Save current state for initial state
+        self.save_state()
+        
+        # Initial 3D render
+        self.update_3d_view()
+    
+    def create_properties_panel(self):
+        """Create the properties panel on the left side"""
+        # Properties notebook with tabs
+        self.props_notebook = ttk.Notebook(self.left_panel)
+        self.props_notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Create tabs
+        self.props_tab = ttk.Frame(self.props_notebook)
+        self.history_tab = ttk.Frame(self.props_notebook)
+        
+        self.props_notebook.add(self.props_tab, text="Properties")
+        self.props_notebook.add(self.history_tab, text="History")
+        
+        # Properties tab content
+        ttk.Label(self.props_tab, text="Model Properties").pack(pady=10)
+        
+        # Color section
+        ttk.Separator(self.props_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Label(self.props_tab, text="Color:").pack(anchor=tk.W, padx=10)
+        
+        # Color dropdown
+        color_var = tk.StringVar(value=self.current_color)
+        color_combo = ttk.Combobox(self.props_tab, textvariable=color_var, 
+                                 values=["viridis", "plasma", "magma", "inferno"])
+        color_combo.pack(fill=tk.X, padx=10, pady=5)
+        color_combo.bind("<<ComboboxSelected>>", 
+                        lambda e: self.set_color(color_var.get()))
+        
+        # Alpha slider
+        alpha_slider = ttk.Scale(self.props_tab, from_=0.1, to=1.0, orient=tk.HORIZONTAL, command=lambda v: self.set_alpha(float(v)))
+        alpha_slider.set(self.current_alpha)
+        alpha_slider.pack(fill=tk.X, padx=10, pady=5)
+        
+        # View mode section
+        ttk.Separator(self.props_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Label(self.props_tab, text="View Mode:").pack(anchor=tk.W, padx=10)
+        
+        # View mode radio buttons
+        view_var = tk.StringVar(value=self.view_mode)
+        ttk.Radiobutton(self.props_tab, text="Solid", variable=view_var, 
+                       value="solid", command=lambda: self.set_view_mode("solid")).pack(anchor=tk.W, padx=20)
+        ttk.Radiobutton(self.props_tab, text="Wireframe", variable=view_var, 
+                       value="wireframe", command=lambda: self.set_view_mode("wireframe")).pack(anchor=tk.W, padx=20)
+        
+        # Quality slider
+        ttk.Separator(self.props_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Label(self.props_tab, text="Quality:").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        
+        quality_slider = ttk.Scale(self.props_tab, from_=0.1, to=1.0, 
+                                 orient=tk.HORIZONTAL, 
+                                 command=lambda v: self.set_quality(float(v)))
+        quality_slider.set(self.shape_quality)
+        quality_slider.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Animation section
+        ttk.Separator(self.props_tab, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=5)
+        ttk.Label(self.props_tab, text="Animation:").pack(anchor=tk.W, padx=10)
+        
+        # Animation controls
+        anim_frame = ttk.Frame(self.props_tab)
+        anim_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(anim_frame, text="Rotate", width=8, 
+                 command=self.start_rotation).pack(side=tk.LEFT)
+        ttk.Button(anim_frame, text="Stop", width=8, 
+                 command=self.stop_animation).pack(side=tk.LEFT, padx=5)
+        
+        # Animation speed
+        ttk.Label(self.props_tab, text="Speed:").pack(anchor=tk.W, padx=10, pady=(10, 0))
+        
+        speed_slider = ttk.Scale(self.props_tab, from_=0.01, to=0.5, 
+                               orient=tk.HORIZONTAL, 
+                               command=lambda v: self.set_animation_speed(float(v)))
+        speed_slider.set(self.animation_speed)
+        speed_slider.pack(fill=tk.X, padx=10, pady=5)
+        
+        # History tab content
+        ttk.Label(self.history_tab, text="Command History").pack(pady=10)
+        
+        # Create history listbox
+        self.history_listbox = tk.Listbox(self.history_tab, bg="#2D2D2D", fg="white", 
+                                        selectbackground="#0078D7", height=15)
+        self.history_listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # History navigation buttons
+        history_btn_frame = ttk.Frame(self.history_tab)
+        history_btn_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        ttk.Button(history_btn_frame, text="Undo", width=8, 
+                 command=self.undo).pack(side=tk.LEFT)
+        ttk.Button(history_btn_frame, text="Redo", width=8, 
+                 command=self.redo).pack(side=tk.LEFT, padx=5)
+        ttk.Button(history_btn_frame, text="Clear", width=8, 
+                 command=self.clear_history).pack(side=tk.LEFT)
+        
+    def setup_3d_view(self):
+        """Setup the 3D visualization area"""
+        # Create 3D visualization with dark theme
+        plt.style.use('dark_background')
+        self.fig = Figure(figsize=(10, 8), dpi=100, facecolor=self.bg_color)
+        self.ax3d = self.fig.add_subplot(111, projection='3d', facecolor=self.bg_color)
+        
+        # Embed in tkinter
+        self.canvas = FigureCanvasTkAgg(self.fig, self.view_panel)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Add matplotlib toolbar
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.view_panel)
+        self.toolbar.update()
+        
+    def set_view_mode(self, mode):
+        """Set the view mode (Solid or Wireframe)"""
+        self.view_mode = mode.lower()
+        self.update_3d_view()
+        self.status_var.set(f"View mode set to {mode}")
+        
+    def set_color(self, color):
+        """Set the current color"""
+        self.current_color = color
+        self.update_3d_view()
+        self.status_var.set(f"Color set to {color}")
+        
+    def set_alpha(self, alpha):
+        """Set the transparency value"""
+        self.current_alpha = alpha
+        self.update_3d_view()
+    
+    def set_quality(self, quality):
+        """Set the shape quality"""
+        self.shape_quality = quality
+        self.update_3d_view()
+        
+    def set_custom_color(self, hex_color):
+        """Set a custom colormap based on the chosen color"""
+        # Create a custom colormap based on the hex color
+        # For simplicity, we'll just use a predefined colormap
+        self.status_var.set(f"Custom color set to {hex_color}")
+        
+        # Map hex colors to colormaps for now
+        if hex_color.startswith('#'):
+            r = int(hex_color[1:3], 16)
+            g = int(hex_color[3:5], 16)
+            b = int(hex_color[5:7], 16)
+            
+            # Simple mapping based on dominant color
+            if r > g and r > b:
+                self.set_color("magma")  # Red-dominant
+            elif g > r and g > b:
+                self.set_color("viridis")  # Green-dominant
+            else:
+                self.set_color("plasma")  # Blue-dominant
+        
+    def update_3d_view(self):
+        """Update the 3D visualization"""
+        self.ax3d.clear()
+        
+        # Configure the axes with modern styling
+        self.ax3d.set_xlabel('X', color='white')
+        self.ax3d.set_ylabel('Y', color='white')
+        self.ax3d.set_zlabel('Z', color='white')
+        self.ax3d.set_title('3D Model', color='white', fontsize=14)
+        
+        # Set background colors
+        self.ax3d.xaxis.pane.fill = False
+        self.ax3d.yaxis.pane.fill = False
+        self.ax3d.zaxis.pane.fill = False
+        
+        # Make grid lines lighter
+        self.ax3d.xaxis._axinfo["grid"].update({"color": "#555555"})
+        self.ax3d.yaxis._axinfo["grid"].update({"color": "#555555"})
+        self.ax3d.zaxis._axinfo["grid"].update({"color": "#555555"})
+        
+        # Find filled voxels
+        x, y, z = np.where(self.voxels == 1)
+        
+        if len(x) > 0:
+            # Render based on view mode
+            if self.view_mode == "wireframe":
+                # Wireframe mode with modern look
+                self.ax3d.scatter(x, y, z, c=z, cmap=self.current_color, 
+                                 marker='o', alpha=0.5, s=30)
+                for i in range(len(x)):
+                    if i % int(10 * (1/self.shape_quality)) == 0:  # Adjust density based on quality
+                        self.ax3d.plot([x[i], x[i]], [y[i], y[i]], [0, z[i]], 
+                                      color='white', alpha=0.1, linewidth=0.5)
+            else:
+                # Solid mode with modern styling
+                self.ax3d.scatter(x, y, z, c=z, cmap=self.current_color, 
+                                 marker='s', alpha=self.current_alpha, 
+                                 s=100*self.shape_quality)
+            
+            # Set limits
+            self.ax3d.set_xlim(0, self.grid_size)
+            self.ax3d.set_ylim(0, self.grid_size)
+            self.ax3d.set_zlim(0, self.grid_size)
+            
+            # Set view angle if rotating
+            if self.is_rotating:
+                self.ax3d.view_init(elev=30, azim=self.rotation_angle)
+        
+        self.canvas.draw()
+        
+    def create_sphere(self):
+        """Create a sphere in the 3D grid"""
+        self.status_var.set("Creating sphere...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        radius = self.grid_size//5
+        
+        # Save current state for undo
+        self.save_state("Create Sphere")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create sphere
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    if ((x-center[0])**2 + (y-center[1])**2 + (z-center[2])**2) <= radius**2:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Sphere created")
+        self.speak_message("Sphere created")
+        
+    def create_cube(self):
+        """Create a cube in the 3D grid"""
+        self.status_var.set("Creating cube...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//4
+        
+        # Save current state for undo
+        self.save_state("Create Cube")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create cube
+        x_min = max(0, center[0]-size)
+        x_max = min(self.grid_size, center[0]+size)
+        y_min = max(0, center[1]-size)
+        y_max = min(self.grid_size, center[1]+size)
+        z_min = max(0, center[2]-size)
+        z_max = min(self.grid_size, center[2]+size)
+        
+        self.voxels[x_min:x_max, y_min:y_max, z_min:z_max] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Cube created")
+        self.speak_message("Cube created")
+        
+    def create_cylinder(self):
+        """Create a cylinder in the 3D grid"""
+        self.status_var.set("Creating cylinder...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        radius = self.grid_size//6
+        height = self.grid_size//2
+        
+        # Save current state for undo
+        self.save_state("Create Cylinder")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create cylinder
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                # Check if point is within circle on XY plane
+                if ((x-center[0])**2 + (y-center[1])**2) <= radius**2:
+                    # Fill along Z axis for height
+                    z_min = max(0, center[2]-height//2)
+                    z_max = min(self.grid_size, center[2]+height//2)
+                    for z in range(z_min, z_max):
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Cylinder created")
+        self.speak_message("Cylinder created")
+        
+    def create_cone(self):
+        """Create a cone in the 3D grid"""
+        self.status_var.set("Creating cone...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        base_radius = self.grid_size//5
+        height = self.grid_size//2
+        
+        # Save current state for undo
+        self.save_state("Create Cone")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create cone
+        z_min = max(0, center[2]-height//2)
+        z_max = min(self.grid_size, center[2]+height//2)
+        
+        for z in range(z_min, z_max):
+            # Calculate radius at this height
+            z_factor = 1 - abs(z - center[2]) / (height/2)
+            radius = base_radius * z_factor
+            
+            for x in range(self.grid_size):
+                for y in range(self.grid_size):
+                    if ((x-center[0])**2 + (y-center[1])**2) <= radius**2:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Cone created")
+        self.speak_message("Cone created")
+    
+    def create_torus(self):
+        """Create a torus in the 3D grid"""
+        self.status_var.set("Creating torus...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        major_radius = self.grid_size//4
+        minor_radius = self.grid_size//12
+        
+        # Save current state for undo
+        self.save_state("Create Torus")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create torus
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    # Calculate distance from center in XY plane
+                    dx, dy = x - center[0], y - center[1]
+                    dist_xy = np.sqrt(dx**2 + dy**2)
+                    
+                    # Distance from the ring center
+                    dist_from_ring = np.abs(dist_xy - major_radius)
+                    
+                    # Distance in Z from center plane
+                    dz = z - center[2]
+                    
+                    # If point is within the minor radius of the ring
+                    if (dist_from_ring**2 + dz**2) <= minor_radius**2:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Torus created")
+        self.speak_message("Torus created")
+    
+    def create_pyramid(self):
+        """Create a pyramid in the 3D grid"""
+        self.status_var.set("Creating pyramid...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        base_size = self.grid_size//3
+        height = self.grid_size//2
+        
+        # Save current state for undo
+        self.save_state("Create Pyramid")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Base coordinates
+        x_min = max(0, center[0] - base_size//2)
+        x_max = min(self.grid_size, center[0] + base_size//2)
+        y_min = max(0, center[1] - base_size//2)
+        y_max = min(self.grid_size, center[1] + base_size//2)
+        z_min = max(0, center[2] - height//2)
+        z_apex = min(self.grid_size, center[2] + height//2)
+        
+        # Create pyramid
+        for z in range(z_min, z_apex):
+            # Calculate scaling factor based on height
+            z_factor = 1.0 - (z - z_min) / (z_apex - z_min)
+            
+            # Calculate size of this layer
+            layer_size_x = int(base_size * z_factor)
+            layer_size_y = int(base_size * z_factor)
+            
+            # Calculate corners of this layer
+            layer_x_min = max(0, center[0] - layer_size_x//2)
+            layer_x_max = min(self.grid_size, center[0] + layer_size_x//2)
+            layer_y_min = max(0, center[1] - layer_size_y//2)
+            layer_y_max = min(self.grid_size, center[1] + layer_size_y//2)
+            
+            # Fill this layer
+            for x in range(layer_x_min, layer_x_max):
+                for y in range(layer_y_min, layer_y_max):
+                    self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Pyramid created")
+        self.speak_message("Pyramid created")
+    
+    def create_prism(self):
+        """Create a triangular prism in the 3D grid"""
+        self.status_var.set("Creating prism...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        base_size = self.grid_size//3
+        height = self.grid_size//2
+        
+        # Save current state for undo
+        self.save_state("Create Prism")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create triangular prism
+        z_min = max(0, center[2] - height//2)
+        z_max = min(self.grid_size, center[2] + height//2)
+        
+        for z in range(z_min, z_max):
+            for x in range(self.grid_size):
+                for y in range(self.grid_size):
+                    # Normalize coordinates to center
+                    nx = (x - center[0]) / (base_size/2)
+                    ny = (y - center[1]) / (base_size/2)
+                    
+                    # Triangular profile
+                    if abs(ny) <= 1 and nx >= -1 and nx <= 1 and ny >= -1 and ny <= 2 * (1 - abs(nx)) - 1:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Prism created")
+        self.speak_message("Prism created")
+    
+    def create_plane(self):
+        """Create a plane in the 3D grid"""
+        self.status_var.set("Creating plane...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//2
+        thickness = 1
+        
+        # Save current state for undo
+        self.save_state("Create Plane")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create plane
+        x_min = max(0, center[0] - size//2)
+        x_max = min(self.grid_size, center[0] + size//2)
+        y_min = max(0, center[1] - size//2)
+        y_max = min(self.grid_size, center[1] + size//2)
+        z_pos = center[2]
+        
+        for z in range(max(0, z_pos - thickness//2), min(self.grid_size, z_pos + thickness//2 + 1)):
+            self.voxels[x_min:x_max, y_min:y_max, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Plane created")
+        self.speak_message("Plane created")
+    
+    def create_disk(self):
+        """Create a disk in the 3D grid"""
+        self.status_var.set("Creating disk...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        radius = self.grid_size//4
+        thickness = 1
+        
+        # Save current state for undo
+        self.save_state("Create Disk")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create disk
+        z_pos = center[2]
+        
+        for z in range(max(0, z_pos - thickness//2), min(self.grid_size, z_pos + thickness//2 + 1)):
+            for x in range(self.grid_size):
+                for y in range(self.grid_size):
+                    if ((x-center[0])**2 + (y-center[1])**2) <= radius**2:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Disk created")
+        self.speak_message("Disk created")
+    
+    def create_rectangle(self):
+        """Create a rectangular prism in the 3D grid"""
+        self.status_var.set("Creating rectangle...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        length = self.grid_size//2
+        width = self.grid_size//4
+        height = self.grid_size//8
+        
+        # Save current state for undo
+        self.save_state("Create Rectangle")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create rectangular prism
+        x_min = max(0, center[0] - length//2)
+        x_max = min(self.grid_size, center[0] + length//2)
+        y_min = max(0, center[1] - width//2)
+        y_max = min(self.grid_size, center[1] + width//2)
+        z_min = max(0, center[2] - height//2)
+        z_max = min(self.grid_size, center[2] + height//2)
+        
+        self.voxels[x_min:x_max, y_min:y_max, z_min:z_max] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Rectangle created")
+        self.speak_message("Rectangle created")
+    
+    def create_triangle(self):
+        """Create a triangular prism in the 3D grid"""
+        self.status_var.set("Creating triangle...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        base = self.grid_size//2
+        height = self.grid_size//2
+        thickness = self.grid_size//8
+        
+        # Save current state for undo
+        self.save_state("Create Triangle")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create triangular prism
+        x_min = max(0, center[0] - base//2)
+        x_max = min(self.grid_size, center[0] + base//2)
+        y_base = max(0, center[1] - height//2)
+        y_top = min(self.grid_size, center[1] + height//2)
+        z_min = max(0, center[2] - thickness//2)
+        z_max = min(self.grid_size, center[2] + thickness//2)
+        
+        for y in range(y_base, y_top):
+            # Calculate width at this height
+            progress = (y - y_base) / (y_top - y_base)
+            width = int(base * (1 - progress))
+            
+            # Calculate x range for this row
+            row_x_min = max(0, center[0] - width//2)
+            row_x_max = min(self.grid_size, center[0] + width//2)
+            
+            # Fill this row
+            self.voxels[row_x_min:row_x_max, y, z_min:z_max] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Triangle created")
+        self.speak_message("Triangle created")
+    
+    def create_tetrahedron(self):
+        """Create a tetrahedron in the 3D grid"""
+        self.status_var.set("Creating tetrahedron...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//3
+        
+        # Save current state for undo
+        self.save_state("Create Tetrahedron")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Define vertices of tetrahedron
+        vertices = [
+            (center[0], center[1] - size//2, center[2] - size//2),  # Front
+            (center[0] - size//2, center[1] + size//2, center[2] - size//2),  # Left
+            (center[0] + size//2, center[1] + size//2, center[2] - size//2),  # Right
+            (center[0], center[1], center[2] + size//2)  # Top
+        ]
+        
+        # Create tetrahedron by checking if each point is inside
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    # Check if point is inside tetrahedron using barycentric coordinates
+                    # This is a simplified approach - actual implementation would use proper barycentric test
+                    distances = [
+                        np.sqrt((x - v[0])**2 + (y - v[1])**2 + (z - v[2])**2)
+                        for v in vertices
+                    ]
+                    if sum(distances) < size * 2:  # Simple heuristic
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Tetrahedron created")
+        self.speak_message("Tetrahedron created")
+    
+    def create_octahedron(self):
+        """Create an octahedron in the 3D grid"""
+        self.status_var.set("Creating octahedron...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//3
+        
+        # Save current state for undo
+        self.save_state("Create Octahedron")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create octahedron
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    # Calculate Manhattan distance to center
+                    dist = abs(x - center[0]) + abs(y - center[1]) + abs(z - center[2])
+                    if dist <= size:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Octahedron created")
+        self.speak_message("Octahedron created")
+    
+    def create_dodecahedron(self):
+        """Create a dodecahedron in the 3D grid (approximation)"""
+        self.status_var.set("Creating dodecahedron...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//3
+        
+        # Save current state for undo
+        self.save_state("Create Dodecahedron")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Create dodecahedron (approximated as a sphere with specific faces)
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    # Calculate distance from center
+                    dx, dy, dz = x - center[0], y - center[1], z - center[2]
+                    dist = np.sqrt(dx**2 + dy**2 + dz**2)
+                    
+                    # Normalize coordinates
+                    nx, ny, nz = dx/size if size > 0 else 0, dy/size if size > 0 else 0, dz/size if size > 0 else 0
+                    
+                    # Complex function to approximate dodecahedron
+                    val = max(abs(nx), abs(ny), abs(nz))
+                    val = val + 0.2 * min(max(abs(nx), abs(ny)), max(abs(ny), abs(nz)), max(abs(nz), abs(nx)))
+                    
+                    if val <= 1:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Dodecahedron created")
+        self.speak_message("Dodecahedron created")
+    
+    def create_icosahedron(self):
+        """Create an icosahedron in the 3D grid (approximation)"""
+        self.status_var.set("Creating icosahedron...")
+        center = (self.grid_size//2, self.grid_size//2, self.grid_size//2)
+        size = self.grid_size//3
+        
+        # Save current state for undo
+        self.save_state("Create Icosahedron")
+        
+        # Clear previous shape
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        
+        # Golden ratio for icosahedron
+        phi = (1 + np.sqrt(5)) / 2
+        
+        # Create vertices of icosahedron
+        vertices = []
+        for i in [-1, 1]:
+            for j in [-1, 1]:
+                vertices.append((0, i, j*phi))
+                vertices.append((i, j*phi, 0))
+                vertices.append((j*phi, 0, i))
+        
+        # Scale and translate vertices
+        vertices = [(center[0] + v[0]*size/3, center[1] + v[1]*size/3, center[2] + v[2]*size/3) for v in vertices]
+        
+        # Create icosahedron by checking distance to edges
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    # Check if point is close to any vertex
+                    min_dist = min(np.sqrt((x-v[0])**2 + (y-v[1])**2 + (z-v[2])**2) for v in vertices)
+                    if min_dist < size/2:
+                        self.voxels[x, y, z] = 1
+        
+        self.update_3d_view()
+        self.status_var.set("Icosahedron created")
+        self.speak_message("Icosahedron created")
+    
+    def clear_canvas(self):
+        """Clear the 3D grid"""
+        # Save current state for undo
+        self.save_state("Clear Canvas")
+        
+        self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+        self.update_3d_view()
+        self.status_var.set("Canvas cleared")
+        self.speak_message("Canvas cleared")
+    
+    def clear_history(self):
+        """Clear the command history"""
+        self.command_history = []
+        self.current_command_index = -1
+        self.save_state("Initial State")
+        self.history_listbox.delete(0, tk.END)
+        self.status_var.set("History cleared")
+        
+    def reset_camera(self):
+        """Reset the camera view to default"""
+        self.ax3d.view_init(elev=30, azim=-60)
+        self.update_3d_view()
+        self.status_var.set("Camera view reset")
+        
+    def set_grid_size(self, size):
+        """Change the grid size"""
+        if size != self.grid_size:
+            # Save current state for undo
+            self.save_state("Change Grid Size")
+            
+            # Create new grid with new size
+            old_voxels = self.voxels
+            self.grid_size = size
+            self.voxels = np.zeros((self.grid_size, self.grid_size, self.grid_size))
+            
+            # Try to preserve existing model by scaling
+            # (simple approach - for complex models would need better interpolation)
+            if np.any(old_voxels):
+                old_size = old_voxels.shape[0]
+                scale_factor = self.grid_size / old_size
+                
+                for x in range(self.grid_size):
+                    for y in range(self.grid_size):
+                        for z in range(self.grid_size):
+                            old_x = min(int(x / scale_factor), old_size-1)
+                            old_y = min(int(y / scale_factor), old_size-1)
+                            old_z = min(int(z / scale_factor), old_size-1)
+                            self.voxels[x, y, z] = old_voxels[old_x, old_y, old_z]
+            
+            self.update_3d_view()
+            self.status_var.set(f"Grid size changed to {size}")
+    
+    def save_state(self, action_name="Action"):
+        """Save current state for undo/redo"""
+        # Remove any redo states
+        if self.current_command_index < len(self.command_history) - 1:
+            self.command_history = self.command_history[:self.current_command_index + 1]
+            # Also update history listbox
+            self.history_listbox.delete(self.current_command_index + 1, tk.END)
+        
+        # Save current state
+        self.command_history.append({
+            'voxels': self.voxels.copy(),
+            'action': action_name
+        })
+        self.current_command_index = len(self.command_history) - 1
+        
+        # Update history listbox
+        self.history_listbox.insert(tk.END, f"{self.current_command_index + 1}: {action_name}")
+        self.history_listbox.see(tk.END)
+    
+    def undo(self):
+        """Undo the last action"""
+        if self.current_command_index > 0:
+            self.current_command_index -= 1
+            state = self.command_history[self.current_command_index]
+            self.voxels = state['voxels'].copy()
+            self.update_3d_view()
+            self.status_var.set(f"Undo: {state['action']}")
+            
+            # Update selection in history listbox
+            self.history_listbox.selection_clear(0, tk.END)
+            self.history_listbox.selection_set(self.current_command_index)
+            self.history_listbox.see(self.current_command_index)
+        else:
+            self.status_var.set("Nothing to undo")
+    
+    def redo(self):
+        """Redo the last undone action"""
+        if self.current_command_index < len(self.command_history) - 1:
+            self.current_command_index += 1
+            state = self.command_history[self.current_command_index]
+            self.voxels = state['voxels'].copy()
+            self.update_3d_view()
+            self.status_var.set(f"Redo: {state['action']}")
+            
+            # Update selection in history listbox
+            self.history_listbox.selection_clear(0, tk.END)
+            self.history_listbox.selection_set(self.current_command_index)
+            self.history_listbox.see(self.current_command_index)
+        else:
+            self.status_var.set("Nothing to redo")
+    
+    def set_animation_speed(self, speed):
+        """Set the animation speed"""
+        self.animation_speed = speed
+        self.status_var.set(f"Animation speed set to {speed:.2f}")
+    
+    def start_rotation(self):
+        """Start/stop rotating the model"""
+        if self.is_rotating:
+            self.is_rotating = False
+            self.status_var.set("Rotation stopped")
+        else:
+            self.stop_animation()  # Stop any other animations
+            self.is_rotating = True
+            self.animation_active = True
+            self.animation_type = "rotation"
+            self.status_var.set("Rotation started")
+            self.rotate_model()
+    
+    def rotate_model(self):
+        """Rotate the model continuously"""
+        if self.is_rotating and self.animation_type == "rotation":
+            self.rotation_angle = (self.rotation_angle + 5) % 360
+            self.update_3d_view()
+            self.root.after(int(100/self.animation_speed), self.rotate_model)
+    
+    def animate_bounce(self):
+        """Animate the model with a bouncing effect"""
+        self.stop_animation()  # Stop any other animations
+        self.animation_active = True
+        self.animation_type = "bounce"
+        self.animation_frame = 0
+        self.status_var.set("Bounce animation started")
+        self.bounce_animation()
+    
+    def bounce_animation(self):
+        """Process bounce animation frames"""
+        if self.animation_active and self.animation_type == "bounce":
+            # Calculate bounce height
+            self.animation_frame = (self.animation_frame + 1) % 60
+            bounce_height = abs(np.sin(self.animation_frame * np.pi/30)) * 20
+            
+            # Update view
+            self.ax3d.view_init(elev=30, azim=self.rotation_angle)
+            self.ax3d.set_zlim(0 + bounce_height, self.grid_size + bounce_height)
+            self.canvas.draw()
+            
+            # Continue animation
+            self.root.after(int(50/self.animation_speed), self.bounce_animation)
+    
+    def animate_pulse(self):
+        """Animate the model with a pulsing effect"""
+        self.stop_animation()  # Stop any other animations
+        self.animation_active = True
+        self.animation_type = "pulse"
+        self.animation_frame = 0
+        self.status_var.set("Pulse animation started")
+        self.pulse_animation()
+    
+    def pulse_animation(self):
+        """Process pulse animation frames"""
+        if self.animation_active and self.animation_type == "pulse":
+            # Calculate pulse alpha
+            self.animation_frame = (self.animation_frame + 1) % 60
+            pulse_alpha = 0.3 + abs(np.sin(self.animation_frame * np.pi/30)) * 0.7
+            
+            # Store original alpha
+            original_alpha = self.current_alpha
+            
+            # Apply pulse alpha
+            self.current_alpha = pulse_alpha
+            self.update_3d_view()
+            
+            # Restore original alpha
+            self.current_alpha = original_alpha
+            
+            # Continue animation
+            self.root.after(int(50/self.animation_speed), self.pulse_animation)
+    
+    def play_animation(self):
+        """Play the current animation"""
+        if not self.animation_active:
+            # Start the most recently used animation or default to rotation
+            if self.animation_type == "rotation":
+                self.start_rotation()
+            elif self.animation_type == "bounce":
+                self.animate_bounce()
+            elif self.animation_type == "pulse":
+                self.animate_pulse()
+            else:
+                self.start_rotation()  # Default
+        else:
+            self.status_var.set("Animation already playing")
+    
+    def pause_animation(self):
+        """Pause the current animation"""
+        if self.animation_active:
+            self.animation_active = False
+            self.is_rotating = False
+            self.status_var.set("Animation paused")
+        else:
+            self.status_var.set("No animation is playing")
+    
+    def stop_animation(self):
+        """Stop all animations"""
+        self.animation_active = False
+        self.is_rotating = False
+        self.status_var.set("Animation stopped")
+        
+        # Reset camera if needed
+        if self.animation_type == "bounce":
+            self.ax3d.set_zlim(0, self.grid_size)
+            self.update_3d_view()
+    
+    def save_image(self):
+        """Save the current 3D view as an image"""
+        try:
+            # Ask for filename
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".png",
+                filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+                title="Save Image As"
+            )
+            
+            if filename:
+                self.fig.savefig(filename, dpi=300, bbox_inches='tight')
+                self.status_var.set(f"Image saved as {filename}")
+        except Exception as e:
+            self.status_var.set(f"Error saving image: {e}")
+            messagebox.showerror("Save Error", f"Could not save image: {e}")
+    
+    def save_project(self):
+        """Save the current project"""
+        try:
+            # Ask for filename
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".3dmodel",
+                filetypes=[("3D Model files", "*.3dmodel"), ("All files", "*.*")],
+                title="Save Project As"
+            )
+            
+            if filename:
+                # Save project data
+                project_data = {
+                    'grid_size': self.grid_size,
+                    'voxels': self.voxels.tolist(),  # Convert to list for JSON serialization
+                    'color': self.current_color,
+                    'alpha': self.current_alpha,
+                    'view_mode': self.view_mode,
+                    'quality': self.shape_quality
+                }
+                
+                with open(filename, 'w') as f:
+                    json.dump(project_data, f)
+                
+                self.status_var.set(f"Project saved as {filename}")
+        except Exception as e:
+            self.status_var.set(f"Error saving project: {e}")
+            messagebox.showerror("Save Error", f"Could not save project: {e}")
+    
+    def save_project_as(self):
+        """Save the current project with a new name"""
+        self.save_project()
+    
+    def export_model(self, format_type=None):
+        """Export the 3D model in the specified format"""
+        if not format_type:
+            # Ask for format if not specified
+            format_type = "obj"  # Default
+        
+        try:
+            # Ask for filename
+            filename = filedialog.asksaveasfilename(
+                defaultextension=f".{format_type}",
+                filetypes=[(f"{format_type.upper()} files", f"*.{format_type}"), ("All files", "*.*")],
+                title=f"Export as {format_type.upper()}"
+            )
+            
+            if filename:
+                # Get voxel coordinates
+                x, y, z = np.where(self.voxels == 1)
+                
+                if len(x) == 0:
+                    messagebox.showinfo("Export", "No model to export. Create a shape first.")
+                    return
+                
+                if format_type == "obj":
+                    # Simple OBJ export - each voxel as a cube
+                    with open(filename, 'w') as f:
+                        # Write header
+                        f.write("# OBJ file created by 3D Modeling Studio\n")
+                        
+                        # Write vertices
+                        vertex_index = 1
+                        for i in range(len(x)):
+                            # Cube vertices for each voxel
+                            f.write(f"v {x[i]} {y[i]} {z[i]}\n")
+                            f.write(f"v {x[i]+1} {y[i]} {z[i]}\n")
+                            f.write(f"v {x[i]+1} {y[i]+1} {z[i]}\n")
+                            f.write(f"v {x[i]} {y[i]+1} {z[i]}\n")
+                            f.write(f"v {x[i]} {y[i]} {z[i]+1}\n")
+                            f.write(f"v {x[i]+1} {y[i]} {z[i]+1}\n")
+                            f.write(f"v {x[i]+1} {y[i]+1} {z[i]+1}\n")
+                            f.write(f"v {x[i]} {y[i]+1} {z[i]+1}\n")
+                            
+                            # Faces for this cube
+                            f.write(f"f {vertex_index} {vertex_index+1} {vertex_index+2} {vertex_index+3}\n")  # Bottom
+                            f.write(f"f {vertex_index+4} {vertex_index+5} {vertex_index+6} {vertex_index+7}\n")  # Top
+                            f.write(f"f {vertex_index} {vertex_index+1} {vertex_index+5} {vertex_index+4}\n")  # Front
+                            f.write(f"f {vertex_index+1} {vertex_index+2} {vertex_index+6} {vertex_index+5}\n")  # Right
+                            f.write(f"f {vertex_index+2} {vertex_index+3} {vertex_index+7} {vertex_index+6}\n")  # Back
+                            f.write(f"f {vertex_index+3} {vertex_index} {vertex_index+4} {vertex_index+7}\n")  # Left
+                            
+                            vertex_index += 8
+                
+                elif format_type == "stl":
+                    # Simple ASCII STL export
+                    with open(filename, 'w') as f:
+                        f.write("solid 3DModelingStudio\n")
+                        
+                        for i in range(len(x)):
+                            # Define a cube for each voxel
+                            # Bottom face
+                            f.write("  facet normal 0 0 -1\n")
+                            f.write("    outer loop\n")
+                            f.write(f"      vertex {x[i]} {y[i]} {z[i]}\n")
+                            f.write(f"      vertex {x[i]+1} {y[i]} {z[i]}\n")
+                            f.write(f"      vertex {x[i]+1} {y[i]+1} {z[i]}\n")
+                            f.write("    endloop\n")
+                            f.write("  endfacet\n")
+                            
+                            f.write("  facet normal 0 0 -1\n")
+                            f.write("    outer loop\n")
+                            f.write(f"      vertex {x[i]} {y[i]} {z[i]}\n")
+                            f.write(f"      vertex {x[i]+1} {y[i]+1} {z[i]}\n")
+                            f.write(f"      vertex {x[i]} {y[i]+1} {z[i]}\n")
+                            f.write("    endloop\n")
+                            f.write("  endfacet\n")
+                            
+                            # Add other 10 triangles for the cube (simplified for brevity)
+                        
+                        f.write("endsolid 3DModelingStudio\n")
+                
+                else:
+                    # For other formats, show a placeholder message
+                    messagebox.showinfo("Export", f"Exporting to {format_type} format is not fully implemented yet.")
+                    self.status_var.set(f"Export to {format_type} not implemented")
+                    return
+                
+                self.status_var.set(f"Model exported as {filename}")
+        except Exception as e:
+            self.status_var.set(f"Error exporting model: {e}")
+            messagebox.showerror("Export Error", f"Could not export model: {e}")
+        
+    def toggle_voice_commands(self):
+        """Toggle voice command recognition on/off"""
+        if self.is_listening:
+            self.is_listening = False
+            self.voice_btn_text.set("Start Voice")
+            self.status_var.set("Voice commands stopped")
+        else:
+            self.is_listening = True
+            self.voice_btn_text.set("Stop Voice")
+            self.status_var.set("Listening for voice commands...")
+            
+            # Start voice recognition in a separate thread
+            self.voice_thread = threading.Thread(target=self.listen_for_commands)
+            self.voice_thread.daemon = True
+            self.voice_thread.start()
+            
+    def listen_for_commands(self):
+        """Listen for voice commands in a loop"""
+        self.speak_message("Voice commands activated")
+        
+        while self.is_listening:
+            try:
+                with sr.Microphone() as source:
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=3)
+                
+                command = self.recognizer.recognize_google(audio).lower()
+                print(f"Recognized: {command}")
+                
+                if "sphere" in command:
+                    self.root.after(0, self.create_sphere)
+                elif "cube" in command or "box" in command:
+                    self.root.after(0, self.create_cube)
+                elif "cylinder" in command:
+                    self.root.after(0, self.create_cylinder)
+                elif "cone" in command:
+                    self.root.after(0, self.create_cone)
+                elif "torus" in command or "donut" in command:
+                    self.root.after(0, self.create_torus)
+                elif "pyramid" in command:
+                    self.root.after(0, self.create_pyramid)
+                elif "clear" in command:
+                    self.root.after(0, self.clear_canvas)
+                elif "red" in command:
+                    self.root.after(0, lambda: self.set_color("magma"))
+                elif "blue" in command:
+                    self.root.after(0, lambda: self.set_color("plasma"))
+                elif "green" in command:
+                    self.root.after(0, lambda: self.set_color("viridis"))
+                elif "wireframe" in command:
+                    self.root.after(0, lambda: self.set_view_mode("wireframe"))
+                elif "solid" in command:
+                    self.root.after(0, lambda: self.set_view_mode("solid"))
+                elif "rotate" in command:
+                    self.root.after(0, self.start_rotation)
+                elif "bounce" in command:
+                    self.root.after(0, self.animate_bounce)
+                elif "pulse" in command:
+                    self.root.after(0, self.animate_pulse)
+                elif "stop" in command and "animation" in command:
+                    self.root.after(0, self.stop_animation)
+                elif "undo" in command:
+                    self.root.after(0, self.undo)
+                elif "redo" in command:
+                    self.root.after(0, self.redo)
+                elif "save" in command:
+                    self.root.after(0, self.save_project)
+                elif "export" in command:
+                    self.root.after(0, self.export_model)
+                elif "stop" in command or "exit" in command:
+                    self.root.after(0, self.toggle_voice_commands)
+                    break
+                
+            except sr.WaitTimeoutError:
+                pass
+            except sr.UnknownValueError:
+                pass
+            except sr.RequestError:
+                self.status_var.set("Could not connect to speech recognition service")
+            except Exception as e:
+                print(f"Error in voice recognition: {e}")
+                
+    def speak_message(self, message):
+        """Convert text to speech"""
+        try:
+            tts = gTTS(text=message, lang="en")
+            tts.save("message.mp3")
+            
+            if platform.system() == "Darwin":  # macOS
+                subprocess.run(["afplay", "message.mp3"], stderr=subprocess.DEVNULL)
+            elif platform.system() == "Windows":
+                os.system("start /min message.mp3")
+            elif platform.system() == "Linux":
+                subprocess.run(["xdg-open", "message.mp3"], stderr=subprocess.DEVNULL)
+        except Exception as e:
+            print(f"Speech error: {e}")
+
+# Run the application
+if __name__ == "__main__":
+    # Install required packages if not already installed
+    try:
+        import ttkthemes
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "ttkthemes"])
+        import ttkthemes
+    
+    root = tk.Tk()
+    app = ModernModelingApp(root)
+    root.mainloop()
